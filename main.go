@@ -205,9 +205,10 @@ func forwardAndZeroCopy(from net.Conn, to net.Conn, mirrors []mirror, closeCh, e
 
 var writeTimeout time.Duration
 
-func forwardAndCopy(from net.Conn, to net.Conn, mirrors []mirror, closeCh, errorCh chan error) {
+func forwardAndCopy(from net.Conn, to net.Conn, mirrors []mirror, closeCh, errorCh chan error, forwardResponse bool) {
 	for {
 		var b [defaultBufferSize]byte
+		var res [defaultBufferSize]byte
 
 		n, err := from.Read(b[:])
 		if err != nil {
@@ -223,6 +224,26 @@ func forwardAndCopy(from net.Conn, to net.Conn, mirrors []mirror, closeCh, error
 		if err != nil {
 			closeCh <- fmt.Errorf("to.Write() failed: %w", err)
 			return
+		}
+
+		if(forwardResponse) {
+			err2 := to.SetReadDeadline(time.Now().Add(2 * time.Second))
+			if err2 != nil {
+				log.Println("SetReadDeadline failed:", err2)
+				return
+			} else {
+				ii, err := to.Read(res[:])
+				if err == nil {
+					fmt.Println("Response size:", string(res[:]))
+					from.Write(res[:ii])
+				} else {
+					if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+						log.Println("read timeout:", err)
+					} else {
+						log.Println("read error:", err)
+					}
+				}
+			}
 		}
 
 		for i := 0; i < len(mirrors); i++ {
@@ -246,18 +267,18 @@ func forwardAndCopy(from net.Conn, to net.Conn, mirrors []mirror, closeCh, error
 	}
 }
 
-func connect(origin net.Conn, forwarder net.Conn, mirrors []mirror, useZeroCopy bool, closeCh chan error, errorCh chan error) {
+func connect(origin net.Conn, forwarder net.Conn, mirrors []mirror, useZeroCopy bool, closeCh chan error, errorCh chan error, forwardResponse bool) {
 
 	for i := 0; i < len(mirrors); i++ {
 		go readAndDiscard(mirrors[i], closeCh)
 	}
 
 	if useZeroCopy {
-		go forwardZeroCopy(forwarder, origin, closeCh)
-		go forwardAndZeroCopy(origin, forwarder, mirrors, closeCh, errorCh)
+		// go forwardZeroCopy(forwarder, origin, closeCh)
+		// go forwardAndZeroCopy(origin, forwarder, mirrors, closeCh, errorCh)
 	} else {
 		go forward(forwarder, origin, closeCh)
-		go forwardAndCopy(origin, forwarder, mirrors, closeCh, errorCh)
+		go forwardAndCopy(origin, forwarder, mirrors, closeCh, errorCh, forwardResponse)
 	}
 
 }
@@ -283,9 +304,11 @@ func main() {
 		forwardAddress  string
 		mirrorAddresses mirrorList
 		useZeroCopy     bool
+		forwardResponse bool
 	)
 
 	flag.BoolVar(&useZeroCopy, "z", false, "use zero copy")
+	flag.BoolVar(&forwardResponse, "r", true, "forward response")
 	flag.StringVar(&listenAddress, "l", "", "listen address (e.g. 'localhost:8080')")
 	flag.StringVar(&forwardAddress, "f", "", "forward to address (e.g. 'localhost:8081')")
 	flag.Var(&mirrorAddresses, "m", "comma separated list of mirror addresses (e.g. 'localhost:8082,localhost:8083')")
@@ -354,7 +377,7 @@ func main() {
 			closeCh := make(chan error, 1024)
 			errorCh := make(chan error, 1024)
 
-			connect(connClient, connForwardee, mirrors, useZeroCopy, closeCh, errorCh)
+			connect(connClient, connForwardee, mirrors, useZeroCopy, closeCh, errorCh, forwardResponse)
 
 			for {
 				select {
